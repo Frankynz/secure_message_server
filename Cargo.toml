@@ -1,0 +1,24 @@
+[package]
+name = "secure_message_server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies]
+actix-web = "4.0"
+aes-gcm = "0.10"
+hex = "0.4"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+uuid = { version = "1.1", features = ["v4", "serde"] }
+lazy_static = "1.4"
+dotenv = "0.15"
+env_logger = "0.9"
+log = "0.4"
+tokio-postgres = "0.7"
+refinery = { version = "0.8", features = ["tokio-postgres"] }
+refinery-core = "0.8"
+refinery-macros = "0.8"
+
