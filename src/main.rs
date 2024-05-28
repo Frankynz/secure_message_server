@@ -1,24 +1,46 @@
+#[macro_use]
+extern crate diesel;
+
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use diesel::r2d2::{self, ConnectionManager};
+use diesel::PgConnection;
 use dotenv::dotenv;
 use log::{info, error, debug};
 use std::env;
-use std::sync::Arc;
-use tokio_postgres::{Client, NoTls};
+use serde::{Deserialize, Serialize};
+use env_logger;
 
 mod db;
 mod storage;
-mod migrations;
+mod schema;
 
-use db::DbClient;
-use storage::{Message, store_message, retrieve_message};
-use migrations::migrations as embedded_migrations;
+use db::{DbPool, establish_connection};
+use storage::{Message, NewMessage, store_message, retrieve_message, delete_message};
 
-async fn send_message(db_client: web::Data<Arc<DbClient>>, msg: web::Json<Message>) -> impl Responder {
+#[derive(Deserialize)]
+struct MessageInput {
+    content: String,
+}
+
+#[derive(Serialize)]
+struct UrlResponse {
+    url: String,
+}
+
+async fn send_message(db_pool: web::Data<DbPool>, msg: web::Json<MessageInput>) -> impl Responder {
+    let mut conn = db::get_conn(&db_pool);
     debug!("Received send_message request with content: {:?}", msg.content);
-    match store_message(&db_client, &msg).await {
-        Ok(url_response) => {
-            debug!("Message stored successfully, response URL: {}", url_response.url);
-            HttpResponse::Ok().json(url_response)
+
+    let new_message = NewMessage {
+        nonce: &msg.content,
+        ciphertext: &msg.content, // Зашифруйте сообщение
+    };
+
+    match store_message(&mut conn, &new_message).await {
+        Ok(stored_message) => {
+            let url = format!("http://localhost:8080/receive/{}", stored_message.id);
+            debug!("Message stored successfully, response URL: {}", url);
+            HttpResponse::Ok().json(UrlResponse { url })
         },
         Err(e) => {
             error!("Failed to store message: {}", e);
@@ -27,13 +49,15 @@ async fn send_message(db_client: web::Data<Arc<DbClient>>, msg: web::Json<Messag
     }
 }
 
-async fn receive_message(db_client: web::Data<Arc<DbClient>>, path: web::Path<String>) -> impl Responder {
+async fn receive_message(db_pool: web::Data<DbPool>, path: web::Path<i64>) -> impl Responder {
+    let mut conn = db::get_conn(&db_pool);
     let id = path.into_inner();
     debug!("Received receive_message request for id: {}", id);
-    match retrieve_message(&db_client, &id).await {
+    match retrieve_message(&mut conn, id).await {
         Ok(message) => {
-            debug!("Message retrieved successfully");
-            HttpResponse::Ok().body(message)
+            delete_message(&mut conn, id).await.ok(); // Удаление сообщения после его получения
+            debug!("Message retrieved and deleted successfully");
+            HttpResponse::Ok().body(message.ciphertext)
         },
         Err(e) => {
             error!("Failed to retrieve message: {}", e);
@@ -47,36 +71,7 @@ async fn main() -> std::io::Result<()> {
     dotenv().ok();
     env_logger::init();
 
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let (mut client, connection) = tokio_postgres::connect(&database_url, NoTls).await
-        .expect("Failed to create DB client");
-
-    info!("Running migrations...");
-    // Запуск миграций
-    match embedded_migrations::runner().run_async(&mut client).await {
-        Ok(_) => info!("Migrations applied successfully!"),
-        Err(e) => {
-            error!("Failed to run migrations: {}", e);
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to run migrations"));
-        }
-    }
-
-    // Проверка состояния клиента после выполнения миграций
-    if client.is_closed() {
-        error!("Database client is closed after migrations.");
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "Database client is closed after migrations"));
-    } else {
-        info!("Database client is open and ready.");
-    }
-
-    // Запуск задачи подключения
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            error!("connection error: {}", e);
-        }
-    });
-
-    let db_client = Arc::new(DbClient { client });
+    let db_pool = establish_connection();
 
     let server_address = env::var("SERVER_ADDRESS").unwrap_or("127.0.0.1".to_string());
     let server_port = env::var("SERVER_PORT").unwrap_or("8080".to_string());
@@ -89,7 +84,7 @@ async fn main() -> std::io::Result<()> {
     // Запуск HTTP-сервера
     HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(Arc::clone(&db_client)))
+            .data(db_pool.clone())
             .route("/send", web::post().to(send_message))
             .route("/receive/{id}", web::get().to(receive_message))
     })
