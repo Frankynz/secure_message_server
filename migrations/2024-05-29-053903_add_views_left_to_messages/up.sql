@@ -1,0 +1,2 @@
+ALTER TABLE messages
+    ADD COLUMN views_left INTEGER NOT NULL DEFAULT 1;
